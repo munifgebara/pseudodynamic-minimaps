@@ -1,0 +1,307 @@
+"""Compile the reviewed manuscript and its separate figure-selection edition.
+
+Requires a TeX installation (pdflatex/bibtex) and pypdf. Run from any directory.
+This command builds documents from saved results; it does not fit models.
+The default is an expanded advisor draft. Use --submission-check to enforce
+the venue's page and character limits before preparing a submission copy.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import zipfile
+
+from pypdf import PdfReader, PdfWriter
+
+
+ROOT = Path(__file__).resolve().parents[1]
+PAPER = ROOT / "paper"
+BUILD = PAPER / "build"
+OUTPUT = ROOT / "output" / "pdf"
+MAIN_FIGURES = [
+    "activity_diagram", "progressive_encoding", "grouped_validation", "encoding_effects",
+    "spatial_controls_examples", "nested_selection_controls", "classifiers_tasks",
+    "participant_fusion", "competitive_methods", "task_subset_effects", "xai_examples", "xai_validation",
+]
+ALTERNATIVES = [
+    "single_signals", "rgb_semantics", "task_atlas", "rgb_task_atlas",
+    "encoding_heatmap", "encoding_tasks", "classifier_contrasts", "fusion_rules",
+    "fusion_roc", "fusion_confusion", "xai_channel_tasks", "xai_agreement", "competitive_task_profiles",
+]
+SUBMISSION_PAGE_LIMIT = 12
+SUBMISSION_CHARACTER_RANGE = (10000, 50000)
+REPRODUCTION_SOURCES = [
+    ROOT / "scripts" / "build_paper.py",
+    ROOT / "scripts" / "generate_paper_figures.py",
+    ROOT / "scripts" / "generate_activity_diagram.py",
+    ROOT / "scripts" / "generate_followup_paper_figures.py",
+    ROOT / "pyproject.toml",
+    ROOT / "requirements-lock.txt",
+]
+EXPERIMENT_STAGES = [
+    ("static-svm-v1", "run_static_svm.py", "verify_static_svm_run.py"),
+    ("dynamic-single-signal-v1", "run_dynamic_single_signal.py", "verify_dynamic_single_signal_run.py"),
+    ("dynamic-triplet-svm-v1", "run_dynamic_triplet_svm.py", "verify_dynamic_triplet_svm_run.py"),
+    ("encoding-comparison-v1", "run_encoding_comparison.py", "verify_encoding_comparison.py"),
+    ("classical-classifier-comparison-v1", "run_classical_classifier_comparison.py", "verify_classical_classifier_comparison.py"),
+    ("task-fusion-v1", "run_task_fusion.py", "verify_task_fusion.py"),
+    ("cnn-v1", "run_cnn.py", "verify_cnn_run.py"),
+    ("cnn-xai-v1", "run_cnn_xai.py", "verify_cnn_xai_run.py"),
+    ("nested-selection-controls-v1", "run_nested_selection_controls.py", "verify_nested_selection_controls.py"),
+    ("competitive-task-subset-v1", "run_competitive_task_subset.py", "verify_competitive_task_subset.py"),
+]
+FOLLOWUP_SCRIPTS = [
+    "prepare_spatial_control_features.py", "verify_spatial_control_features.py",
+    "generate_spatial_control_figure.py", "analyze_nested_selection_controls.py",
+    "finalize_nested_selection_controls.py", "prepare_kinematic_features.py",
+    "verify_kinematic_features.py", "prepare_transfer_features.py",
+    "analyze_competitive_task_subset.py", "finalize_competitive_task_subset.py", "generate_followup_paper_figures.py",
+]
+EXPERIMENT_README = PAPER / "review" / "experimental_reproduction.md"
+
+
+def experimental_sources() -> list[Path]:
+    """Select code/configuration explicitly; never traverse saved run outputs."""
+    paths = sorted((ROOT / "src" / "pdhms_restart").glob("*.py"))
+    for stage, runner, verifier in EXPERIMENT_STAGES:
+        paths.extend([ROOT / "scripts" / runner, ROOT / "scripts" / verifier,
+                      ROOT / "experiments" / "2026-09-restart" / stage / "config.json"])
+    paths.extend([ROOT / "pyproject.toml", ROOT / "requirements-lock.txt"])
+    paths.extend(ROOT / "scripts" / name for name in FOLLOWUP_SCRIPTS)
+    for stage in ("nested-selection-controls-v1", "competitive-task-subset-v1"):
+        directory = ROOT / "experiments/2026-09-restart" / stage
+        paths.extend([directory / "DECISION.md", directory / "README.md"])
+    directory = ROOT / "experiments/2026-09-restart/competitive-task-subset-v1"
+    paths.extend(directory / name for name in ("kinematic_descriptor.json", "transfer_descriptor.json", "kinematic_features.md"))
+    paths.extend(ROOT / "tests" / name for name in ("test_competitive_selection.py", "test_competitive_analysis.py",
+                  "test_kinematic_features.py", "test_transfer_features.py", "test_nested_selection.py",
+                  "test_selection_analysis.py", "test_spatial_controls.py"))
+    missing = [str(path) for path in [*paths, EXPERIMENT_README] if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(f"Missing experimental reproduction sources: {missing}")
+    return paths
+
+
+def write_experimental_package(archive: zipfile.ZipFile) -> dict:
+    """Archive exact source copies without fitting or loading participant data."""
+    paths = experimental_sources()
+    prefix = "reproducibility/experimental/"
+    for path in paths:
+        archive.write(path, arcname=prefix + path.relative_to(ROOT).as_posix())
+    archive.write(EXPERIMENT_README, arcname=prefix + "README.md")
+    aggregates = {
+        "nested-selection-controls-v1": ["global_summary.csv", "task_global_comparisons.csv", "fusion_comparisons.csv", "task_specific_comparisons.csv", "encoding_selection_frequency.csv"],
+        "competitive-task-subset-v1": ["global_summary.csv", "method_comparisons.csv", "task_subset_comparisons.csv", "task_summary.csv", "encoding_selection_frequency.csv"],
+    }
+    aggregate_hashes = {}
+    for stage, names in aggregates.items():
+        for name in names:
+            path = ROOT / "experiments/2026-09-restart/runs" / stage / "metrics" / name
+            arcname = f"reproducibility/aggregate_results/{stage}/{name}"
+            archive.write(path, arcname=arcname)
+            aggregate_hashes[arcname] = digest(path)
+    manifest = {
+        "scope": "Code and original configurations for the ten manuscript stages, including the controlled follow-up experiments",
+        "experiments_executed_during_packaging": False,
+        "stage_order": [stage for stage, _, _ in EXPERIMENT_STAGES],
+        "source_file_count": len(paths),
+        "source_bytes": sum(path.stat().st_size for path in paths),
+        "source_sha256": {path.relative_to(ROOT).as_posix(): digest(path) for path in paths},
+        "readme_sha256": digest(EXPERIMENT_README),
+        "aggregate_results_sha256": aggregate_hashes,
+        "excluded": ["participant recordings and identifiers", "individual predictions",
+                     "model checkpoints and attribution maps", "individual and intermediate run artifacts",
+                     "width-ablation and performance-gap-audit scripts/configurations"],
+    }
+    archive.writestr(prefix + "manifest.json", json.dumps(manifest, indent=2) + "\n")
+    return manifest
+
+
+def run(command: list[str], cwd: Path, env: dict[str, str] | None = None) -> None:
+    result = subprocess.run(command, cwd=cwd, env=env, capture_output=True, text=True,
+                            encoding="utf-8", errors="replace", check=False)
+    with (BUILD / "build.log").open("a", encoding="utf-8") as stream:
+        stream.write(f"\nCommand: {command!r}\n{result.stdout}\n{result.stderr}\n")
+    if result.returncode:
+        raise RuntimeError(f"Build failed: {command[0]}. See {BUILD / 'build.log'}")
+
+
+def compile_tex(stem: str, bibliography: bool = False) -> None:
+    command = ["pdflatex", "-interaction=batchmode", "-halt-on-error",
+               "-file-line-error", "-output-directory=build", f"{stem}.tex"]
+    run(command, PAPER)
+    if bibliography:
+        environment = os.environ.copy()
+        environment["BIBINPUTS"] = ".." + os.pathsep + environment.get("BIBINPUTS", "")
+        environment["BSTINPUTS"] = ".." + os.pathsep + environment.get("BSTINPUTS", "")
+        run(["bibtex", stem], BUILD, environment)
+        run(command, PAPER)
+    run(command, PAPER)
+    log = (BUILD / f"{stem}.log").read_text(encoding="utf-8", errors="replace")
+    problems = [line for line in log.splitlines() if
+                "Overfull" in line or "undefined" in line.lower() or
+                "Rerun to get cross-references right" in line or
+                "Float too large" in line or "Missing character:" in line]
+    if problems:
+        raise RuntimeError(f"Unresolved layout/reference warnings in {stem}: {problems}")
+
+
+def digest(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--submission-check", action="store_true",
+        help="Require the main manuscript to meet the 12-page and character limits.",
+    )
+    arguments = parser.parse_args()
+    BUILD.mkdir(parents=True, exist_ok=True)
+    OUTPUT.mkdir(parents=True, exist_ok=True)
+    (BUILD / "build.log").write_text("Reviewed manuscript build\n", encoding="utf-8")
+    compile_tex("main", bibliography=True)
+    primary = PdfReader(BUILD / "main.pdf")
+    main_pages = len(primary.pages)
+    if main_pages < 1:
+        raise ValueError("The main manuscript PDF contains no pages.")
+    if arguments.submission_check and main_pages > SUBMISSION_PAGE_LIMIT:
+        raise ValueError(
+            f"Main has {main_pages} pages; submission limit is {SUBMISSION_PAGE_LIMIT}. "
+            "Omit --submission-check when building the expanded advisor draft."
+        )
+    gallery_first_page = main_pages + 1
+    # Package this generated value so gallery.tex also compiles in Overleaf.
+    (PAPER / "gallery_start.tex").write_text(
+        "% Generated by scripts/build_paper.py after compiling main.tex.\n"
+        f"% The main manuscript has {main_pages} physical pages.\n"
+        f"\\newcommand{{\\galleryfirstpage}}{{{gallery_first_page}}}\n",
+        encoding="utf-8",
+    )
+    extracted = "\n".join(page.extract_text() or "" for page in primary.pages)
+    characters = len(re.sub(r"\s", "", extracted))
+    character_limit_satisfied = (
+        SUBMISSION_CHARACTER_RANGE[0] <= characters <= SUBMISSION_CHARACTER_RANGE[1]
+    )
+    if arguments.submission_check and not character_limit_satisfied:
+        raise ValueError(f"Non-whitespace character count outside venue range: {characters}")
+    main_source = (PAPER / "main.tex").read_text(encoding="utf-8")
+    abstract = main_source.split("\\abstract{", 1)[1].split("}\n", 1)[0]
+    abstract_words = len(abstract.split())
+    if not 70 <= abstract_words <= 200:
+        raise ValueError(f"Abstract length outside template range: {abstract_words}")
+
+    tex = "\n".join(path.read_text(encoding="utf-8") for path in
+                    [PAPER / "main.tex", *sorted((PAPER / "sections").glob("*.tex"))])
+    included = re.findall(r"\\includegraphics(?:\[[^\]]*\])?\{([^}]+)\}", tex)
+    if [Path(name).stem for name in included] != MAIN_FIGURES:
+        raise ValueError(
+            "Main figure inventory/order differs from the declared list, with the activity diagram first."
+        )
+    for index in range(1, len(MAIN_FIGURES) + 1):
+        if f"Figure {index}:" not in extracted:
+            raise ValueError(f"Figure {index} caption missing from primary PDF.")
+
+    compile_tex("gallery")
+    gallery = PdfReader(BUILD / "gallery.pdf")
+    if len(gallery.pages) != len(ALTERNATIVES):
+        raise ValueError("The gallery must contain one page for each declared alternative.")
+
+    shutil.copyfile(BUILD / "main.pdf", OUTPUT / "manuscript.pdf")
+    selection = PdfWriter()
+    selection.append(primary, import_outline=False)
+    selection.append(gallery, import_outline=False)
+    selection.add_metadata({"/Title": "Handwriting minimaps: manuscript and alternative figures",
+                            "/Author": "Anonymous Authors",
+                            "/Subject": f"Editorial selection edition; alternatives begin on page {gallery_first_page}"})
+    selection.add_outline_item(f"Main manuscript ({main_pages} pages)", 0)
+    parent = selection.add_outline_item("Alternative figures for editorial selection", main_pages)
+    for index, name in enumerate(ALTERNATIVES):
+        selection.add_outline_item(f"A{index + 1}: {name.replace('_', ' ')}", main_pages + index,
+                                   parent=parent)
+    selection_path = OUTPUT / "manuscript_with_figure_alternatives.pdf"
+    selection.write(selection_path)
+    final = PdfReader(selection_path)
+    if (len(final.pages) != main_pages + len(ALTERNATIVES)
+            or "A1" not in (final.pages[main_pages].extract_text() or "")):
+        raise ValueError(f"Alternative gallery does not begin at physical page {gallery_first_page}.")
+    for index, page in enumerate(final.pages[main_pages:], gallery_first_page):
+        page_text = page.extract_text() or ""
+        if not re.search(rf"\b{index}\s*$", page_text):
+            raise ValueError(f"Printed gallery page number does not match physical page {index}.")
+
+    source_files = [PAPER / name for name in
+                    ["main.tex", "gallery.tex", "gallery_start.tex", "refs.bib", "article.cls", "SCITEPRESS.sty",
+                     "apalike.sty", "apalike.bst", "README.md"]]
+    source_files += sorted((PAPER / "sections").glob("*.tex"))
+    source_files += sorted((PAPER / "figures").glob("*.pdf"))
+    source_files += sorted((PAPER / "figures").glob("*.png"))
+    source_files += sorted((PAPER / "figures").glob("*.svg"))
+    source_files += [PAPER / "figures" / name for name in
+                     ["figure_manifest.json", "activity_diagram_manifest.json", "followup_figure_manifest.json"]]
+    source_files += sorted((PAPER / "review").glob("*.md"))
+    required_activity = [PAPER / "figures" / f"activity_diagram.{extension}"
+                         for extension in ("pdf", "png", "svg")]
+    missing = [str(path) for path in [*source_files, *required_activity, *REPRODUCTION_SOURCES]
+               if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(f"Missing manuscript/reproducibility sources: {missing}")
+    package = OUTPUT / "manuscript_overleaf.zip"
+    with zipfile.ZipFile(package, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for path in source_files:
+            archive.write(path, arcname=path.relative_to(PAPER).as_posix())
+        for path in REPRODUCTION_SOURCES:
+            archive.write(path, arcname="reproducibility/" + path.relative_to(ROOT).as_posix())
+        experimental_manifest = write_experimental_package(archive)
+        archive.writestr(
+            "reproducibility/README.txt",
+            "These are exact copies of the manuscript/figure generators and project environment files.\n"
+            "Run them from the original experiment repository with its saved runs and src/ package.\n"
+            "experimental/ additionally contains the exact code and original configurations for the\n"
+            "ten manuscript experiment stages. Read experimental/README.md for data requirements,\n"
+            "path changes in a fresh working copy, command order, and reproduction limits.\n"
+            "The Overleaf package supplies the rendered figures, editable activity SVG, source manifests,\n"
+            "and generated gallery_start.tex; it does not embed participant recordings or model checkpoints.\n"
+            "Compile main.tex or gallery.tex at the archive root for normal Overleaf editing.\n"
+            "In the experiment repository: python scripts/build_paper.py builds the expanded advisor draft;\n"
+            "python scripts/build_paper.py --submission-check also enforces venue page/character limits.\n",
+        )
+
+    bibliography = (BUILD / "main.bbl").read_text(encoding="utf-8")
+    report = {
+        "build_mode": "submission_check" if arguments.submission_check else "expanded_advisor_draft",
+        "main_pages": main_pages, "selection_pages": len(final.pages),
+        "alternatives_first_physical_page": gallery_first_page,
+        "submission_page_limit": SUBMISSION_PAGE_LIMIT,
+        "submission_page_limit_satisfied": main_pages <= SUBMISSION_PAGE_LIMIT,
+        "submission_character_range": list(SUBMISSION_CHARACTER_RANGE),
+        "submission_character_range_satisfied": character_limit_satisfied,
+        "main_non_whitespace_characters_from_pdf_text": characters,
+        "character_count_note": "Text extracted from final PDF, including extractable figure/table text and references.",
+        "abstract_words": abstract_words,
+        "main_figures": MAIN_FIGURES, "alternative_figures": ALTERNATIVES,
+        "main_tables": len(re.findall(r"\\begin\{table\*?\}", tex)),
+        "cited_references": bibliography.count("\\bibitem"),
+        "latex_unresolved_reference_or_overflow_warnings": [],
+        "outputs_sha256": {path.name: digest(path) for path in
+                           [OUTPUT / "manuscript.pdf", selection_path, package]},
+        "source_sha256": {path.relative_to(PAPER).as_posix(): digest(path) for path in source_files},
+        "reproducibility_source_sha256": {path.relative_to(ROOT).as_posix(): digest(path)
+                                          for path in REPRODUCTION_SOURCES},
+        "experimental_reproducibility": experimental_manifest,
+    }
+    (PAPER / "review" / "build_verification.json").write_text(
+        json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    print(json.dumps({key: value for key, value in report.items()
+                      if key != "source_sha256"}, indent=2, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    main()

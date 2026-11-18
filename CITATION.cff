@@ -1,0 +1,56 @@
+cff-version: 1.2.0
+title: >-
+  Reproducibility package for "Pseudodynamic Minimaps: Encoding Pen Dynamics in
+  Handwriting Images for Parkinson's Disease Classification"
+message: If you use this software, please cite the accompanying paper.
+type: software
+license: MIT
+repository-code: https://github.com/munifgebara/pseudodynamic-minimaps
+authors:
+  - family-names: Gebara Junior
+    given-names: Munif
+    orcid: https://orcid.org/0009-0007-4773-5468
+    affiliation: Universidade Estadual de Maringá
+  - family-names: Sánchez
+    given-names: Ángel
+    orcid: https://orcid.org/0000-0001-9069-6985
+    affiliation: Universidad Rey Juan Carlos
+  - family-names: Maldonado e Gomes da Costa
+    given-names: Yandre
+    orcid: https://orcid.org/0000-0002-0630-3171
+    affiliation: Universidade Estadual de Maringá
+  - family-names: Wiese
+    given-names: Igor Scaliante
+    orcid: https://orcid.org/0000-0001-9943-5570
+    affiliation: Universidade Tecnológica Federal do Paraná
+  - family-names: Cordeiro
+    given-names: André Felipe Ribeiro
+    orcid: https://orcid.org/0000-0001-6719-2826
+    affiliation: Universidade Estadual de Maringá
+  - family-names: Souza
+    given-names: Jamily G. S.
+    orcid: https://orcid.org/0009-0009-2634-8965
+    affiliation: Universidade Estadual de Maringá
+preferred-citation:
+  type: conference-paper
+  title: >-
+    Pseudodynamic Minimaps: Encoding Pen Dynamics in Handwriting Images for
+    Parkinson's Disease Classification
+  collection-title: >-
+    Proceedings of the International Conference on Computer Vision Theory and
+    Applications (VISAPP)
+  year: 2027
+  notes: Accepted as a short paper; page numbers and DOI to be added on publication.
+  authors:
+    - family-names: Gebara Junior
+      given-names: Munif
+    - family-names: Sánchez
+      given-names: Ángel
+    - family-names: Maldonado e Gomes da Costa
+      given-names: Yandre
+    - family-names: Wiese
+      given-names: Igor Scaliante
+    - family-names: Cordeiro
+      given-names: André Felipe Ribeiro
+    - family-names: Souza
+      given-names: Jamily G. S.
